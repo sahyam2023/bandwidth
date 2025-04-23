@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Monitor Dashboard</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN" crossorigin="anonymous">
+    <style>
+        /* Custom styles */
+        body {
+            padding-top: 1rem; /* Add some padding below the potentially fixed navbar */
+            background-color: #f8f9fa; /* Light grey background */
+        }
+        /* Make text visible on progress bars */
+        .progress-bar span {
+            position: absolute;
+            display: block;
+            width: 100%;
+            color: #333; /* Darker text for better contrast on light bars */
+            font-weight: 500;
+            font-size: 0.8em;
+            text-align: center;
+        }
+         /* Sorting arrows */
+        th[data-sortkey] {
+             cursor: pointer;
+             position: relative;
+             padding-right: 20px; /* Make space for arrow */
+             white-space: nowrap;
+        }
+        th[data-sortkey]::after {
+            content: '';
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            margin-top: -7px; /* Adjust vertical position */
+            border: 4px solid transparent;
+            opacity: 0.3;
+        }
+        th[data-sortkey].sort-asc::after {
+            border-bottom: 6px solid #000; /* Make arrow slightly bigger */
+            border-top: none;
+            opacity: 1;
+        }
+        th[data-sortkey].sort-desc::after {
+            border-top: 6px solid #000; /* Make arrow slightly bigger */
+            border-bottom: none;
+            opacity: 1;
+        }
+        .na {
+            color: #6c757d; /* Bootstrap text-muted color */
+            font-style: italic;
+        }
+        /* Adjusted for peer traffic */
+        .disk-info, .adapter-info, .peer-info {
+            font-size: 0.85em;
+            display: block; /* Ensure each takes its own line */
+            margin-bottom: 2px;
+            /* white-space: nowrap; /* Allow wrapping for longer IPs/names if needed */
+        }
+        .disk-info:last-child, .adapter-info:last-child, .peer-info:last-child {
+            margin-bottom: 0;
+        }
+        .adapter-name, .peer-dest-ip { /* Style destination IP */
+            font-weight: 500;
+        }
+        /* Ensure table cell content doesn't stretch row height too much */
+        #summaryTable td {
+             vertical-align: middle;
+        }
+        /* Small text for details */
+        .details {
+            font-size: 0.8em;
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container-fluid">
+        <h1 class="text-center my-4">System Monitor Dashboard</h1>
+
+        <!-- Loading Indicator -->
+        <div id="loading" class="text-center my-5">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="mt-2">Loading initial data...</p>
+        </div>
+
+        <!-- Error Message Area -->
+        <div id="error" class="alert alert-danger d-none" role="alert">
+            <!-- Error message will be inserted here -->
+        </div>
+
+        <!-- Main Table Area -->
+        <div id="dashboardContent" class="d-none">
+            <div class="table-responsive"> <!-- Important for small screens -->
+               <table id="summaryTable" class="table table-striped table-hover table-bordered table-sm align-middle">
+                   <thead class="table-light"> <!-- Lighter header -->
+                       <tr>
+                           <!-- Add data-sortkey attribute matching the keys in the JSON data -->
+                           <th data-sortkey="hostname">Hostname</th>
+                           <th data-sortkey="cpu_percent" style="width: 10%;">CPU %</th>
+                           <th data-sortkey="mem_percent" style="width: 10%;">Mem %</th>
+                           <th data-sortkey="total_throughput_mbps">Total Thr.<br><small>(Mbps)</small></th>
+                           <th data-sortkey="sent_mbps">Sent<br><small>(Mbps)</small></th>
+                           <th data-sortkey="recv_mbps">Recv<br><small>(Mbps)</small></th>
+                           <th data-sortkey="network_adapters" style="min-width: 200px;">Network Interfaces<br><small>(Util % | Speed Mbps)</small></th>
+                           <!-- NEW PEER TRAFFIC COLUMN -->
+                           <th data-sortkey="peer_traffic" style="min-width: 180px;">Peer Traffic<br><small>(→ Outbound Mbps)</small></th>
+                           <th data-sortkey="disks" style="min-width: 220px;">Disk Usage<br><small>(% Used | Free / Total GB)</small></th>
+                           <th data-sortkey="last_seen_relative">Last Seen</th>
+                       </tr>
+                   </thead>
+                   <tbody id="summaryTableBody">
+                       <!-- Data rows will be inserted here by JavaScript -->
+                   </tbody>
+               </table>
+           </div>
+
+           <div id="lastUpdated" class="text-center text-muted mt-3 mb-4"></div>
+       </div> <!-- End #dashboardContent -->
+
+   </div> <!-- End .container-fluid -->
+
+    <!-- Bootstrap JS Bundle (includes Popper) -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL" crossorigin="anonymous"></script>
+
+    <script>
+        const apiUrl = '/api/latest_data';
+        const refreshInterval = 5000; // 5 seconds
+        const tableBody = document.getElementById('summaryTableBody');
+        const loadingDiv = document.getElementById('loading');
+        const errorDiv = document.getElementById('error');
+        const lastUpdatedDiv = document.getElementById('lastUpdated');
+        const tableHeaders = document.querySelectorAll('#summaryTable th[data-sortkey]');
+        const dashboardContentDiv = document.getElementById('dashboardContent');
+
+        let currentSortKey = 'hostname'; // Default sort by hostname
+        let currentSortOrder = 'asc';
+        let initialLoad = true;
+
+        // --- Helper: Get color class based on percentage ---
+        function getProgressColor(percent) {
+            if (percent < 0) return 'bg-secondary'; // N/A or error
+            if (percent >= 90) return 'bg-danger';
+            if (percent >= 75) return 'bg-warning';
+            return 'bg-success';
+        }
+
+        // --- Helper: Format number or return N/A span ---
+        function formatNumRaw(num, decimals = 1) {
+            // Added check for non-finite numbers like Infinity
+            if (num === null || typeof num !== 'number' || !isFinite(num) || num < 0) {
+                return '<span class="na">N/A</span>';
+            }
+            return num.toFixed(decimals);
+        }
+
+        // --- Helper: Format percentage with Progress Bar ---
+        function formatPercentWithProgress(percent) {
+             if (percent === null || typeof percent !== 'number' || !isFinite(percent) || percent < 0) {
+                return '<span class="na">N/A</span>';
+            }
+             // Cap percentage at 100 for display width
+             const displayWidthPercent = Math.min(percent, 100);
+             const displayValuePercent = percent.toFixed(1); // Show actual value even if > 100
+             const colorClass = getProgressColor(percent);
+
+            return `
+                <div class="progress" role="progressbar" aria-label="${displayValuePercent}%" aria-valuenow="${displayValuePercent}" aria-valuemin="0" aria-valuemax="100" style="height: 20px; background-color: #e9ecef;">
+                    <div class="progress-bar ${colorClass}" style="width: ${displayWidthPercent}%">
+                        <span>${displayValuePercent}%</span>
+                    </div>
+                </div>`;
+        }
+
+        // --- Helper: Format Disk Info (Unchanged) ---
+        function formatDisks(disksData) {
+            if (!disksData || typeof disksData !== 'object' || Object.keys(disksData).length === 0) {
+                return '<span class="na">N/A</span>';
+            }
+            let diskHtml = '';
+            const sortedKeys = Object.keys(disksData).sort();
+            sortedKeys.forEach(key => {
+                const disk = disksData[key];
+                let percentHtml = '<span class="na">N/A</span>';
+                let detailsHtml = '<span class="na">N/A</span>';
+
+                if (disk && typeof disk === 'object') {
+                    const percent = disk.percent;
+                    if (percent !== null && typeof percent === 'number' && !isNaN(percent) && percent >= 0) {
+                         percentHtml = formatPercentWithProgress(percent);
+                    }
+                    const freeGb = formatNumRaw(disk.free_gb, 1);
+                    const totalGb = formatNumRaw(disk.total_gb, 1);
+                    if (freeGb !== '<span class="na">N/A</span>' && totalGb !== '<span class="na">N/A</span>') {
+                        detailsHtml = `<div class="details text-muted small">${freeGb} / ${totalGb} GB Free</div>`;
+                    } else {
+                        detailsHtml = `<div class="details text-muted small"><span class="na">N/A</span></div>`;
+                    }
+                }
+                diskHtml += `<div class="disk-info mb-1">
+                               <div><span class="fw-bold">${key}:</span></div>
+                               <div class="mb-1">${percentHtml}</div>
+                               ${detailsHtml}
+                             </div>`;
+            });
+            return diskHtml || '<span class="na">N/A</span>';
+        }
+
+        // --- Helper: Format Network Adapters (Unchanged) ---
+        function formatNetworkAdapters(adaptersData) {
+            if (!adaptersData || typeof adaptersData !== 'object' || Object.keys(adaptersData).length === 0) {
+                return '<span class="na">N/A</span>';
+            }
+            let adapterHtml = '';
+            const sortedNames = Object.keys(adaptersData).sort();
+            sortedNames.forEach(name => {
+                const adapter = adaptersData[name];
+                let utilHtml = '<span class="na">N/A</span>';
+                let speedHtml = '<span class="na">N/A</span>';
+
+                if (adapter && typeof adapter === 'object') {
+                     const util = adapter.utilization_percent;
+                     if (util !== null && typeof util === 'number' && !isNaN(util) && util >= 0) {
+                         utilHtml = formatPercentWithProgress(util);
+                     }
+                     const speed = formatNumRaw(adapter.link_speed_mbps, 0);
+                     if (speed !== '<span class="na">N/A</span>') {
+                         speedHtml = `<div class="details text-muted small">(${speed} Mbps Speed)</div>`;
+                     } else {
+                          speedHtml = `<div class="details text-muted small"><span class="na">N/A</span></div>`;
+                     }
+                }
+                 adapterHtml += `<div class="adapter-info mb-1">
+                                    <div><span class="adapter-name">${name}:</span></div>
+                                    <div class="mb-1">${utilHtml}</div>
+                                    ${speedHtml}
+                                 </div>`;
+            });
+            return adapterHtml || '<span class="na">N/A</span>';
+        }
+
+        // --- *** NEW *** Helper: Format Peer Traffic ---
+        function formatPeerTraffic(peerData, ownAgentIp) {
+             if (!peerData || typeof peerData !== 'object' || Object.keys(peerData).length === 0) {
+                return '<span class="na">N/A</span>';
+            }
+            if (!ownAgentIp) { // Need own IP to filter correctly
+                 console.warn("Cannot format peer traffic: ownAgentIp not provided.");
+                 return '<span class="na">Own IP Missing</span>';
+            }
+
+            let htmlOutput = '';
+            let hasOutbound = false;
+
+            // Sort keys for consistent display (optional)
+            const sortedKeys = Object.keys(peerData).sort();
+
+            sortedKeys.forEach(key => {
+                const flowData = peerData[key];
+                const parts = key.split('_to_'); // Expected format "SRCIP_to_DSTIP"
+                if (parts.length === 2) {
+                    const srcIp = parts[0];
+                    const dstIp = parts[1];
+
+                    // Filter: Show only flows *originating* from this agent's IP
+                    if (srcIp === ownAgentIp) {
+                        let mbps = flowData?.Mbps; // Use optional chaining
+                        let formattedMbps = formatNumRaw(mbps, 2); // Use 2 decimal places for Mbps
+
+                        if (formattedMbps !== '<span class="na">N/A</span>') {
+                            // Use text-nowrap if needed, but Bootstrap table-sm might handle it
+                             htmlOutput += `<div class="peer-info">
+                                               <span>→</span> <span class="peer-dest-ip">${dstIp}:</span> ${formattedMbps} Mbps
+                                            </div>`;
+                             hasOutbound = true;
+                        }
+                         // Optionally show flows with 0 Mbps if desired:
+                         // else {
+                         //     htmlOutput += `<div class="peer-info text-muted"><span>→</span> ${dstIp}: 0.00 Mbps</div>`;
+                         //     hasOutbound = true;
+                         // }
+                    }
+                }
+            });
+
+            return hasOutbound ? htmlOutput : '<span class="na">None</span>'; // Show "None" if no outbound found
+        }
+
+
+        // --- Function to Update Table (Modified) ---
+        function updateTable(data) {
+            if (initialLoad) {
+                loadingDiv.classList.add('d-none');
+                dashboardContentDiv.classList.remove('d-none');
+                initialLoad = false;
+            }
+            errorDiv.classList.add('d-none');
+            tableBody.innerHTML = '';
+
+            const hostnames = Object.keys(data);
+            // *** UPDATE COLUMN COUNT ***
+            const numColumns = 10; // Host, CPU, Mem, Thr, Sent, Recv, Interfaces, Peer, Disk, Seen
+
+            if (hostnames.length === 0) {
+                tableBody.innerHTML = `<tr><td colspan="${numColumns}" class="text-center text-muted">No active agents reporting.</td></tr>`;
+                return;
+            }
+
+            const dataArray = hostnames.map(hostname => data[hostname]);
+
+            // --- Sorting Logic (Modified for Peer Traffic) ---
+             dataArray.sort((a, b) => {
+                if (!a?.data || !b?.data) return 0;
+
+                let valA, valB;
+
+                if (currentSortKey === 'peer_traffic') {
+                    // Calculate total outbound Mbps for sorting
+                    const calculateTotalOutbound = (peerData, ownIp) => {
+                        let totalMbps = 0;
+                        if (!peerData || typeof peerData !== 'object' || !ownIp) return -Infinity;
+                        for (const [key, flowData] of Object.entries(peerData)) {
+                             const parts = key.split('_to_');
+                             if (parts.length === 2 && parts[0] === ownIp) {
+                                 const mbps = flowData?.Mbps;
+                                 if (typeof mbps === 'number' && isFinite(mbps) && mbps >= 0) {
+                                     totalMbps += mbps;
+                                 }
+                             }
+                        }
+                        return totalMbps > 0 ? totalMbps : -Infinity; // Ensure N/A sorts low unless > 0
+                    };
+                    valA = calculateTotalOutbound(a.data.peer_traffic, a.data.agent_ip); // Use agent_ip here!
+                    valB = calculateTotalOutbound(b.data.peer_traffic, b.data.agent_ip); // Use agent_ip here!
+                }
+                // Special sorting for disks by C: drive percentage (or primary identifier)
+                else if (currentSortKey === 'disks') {
+                     // Find the first key alphabetically (often 'C') or use -Infinity
+                     const getPrimaryDiskPercent = (hostData) => {
+                          if (!hostData.disks || typeof hostData.disks !== 'object') return -Infinity;
+                          const keys = Object.keys(hostData.disks).sort();
+                          if (keys.length > 0 && hostData.disks[keys[0]]?.percent !== undefined) {
+                               const percent = hostData.disks[keys[0]].percent;
+                               return typeof percent === 'number' && isFinite(percent) ? percent : -Infinity;
+                          }
+                          return -Infinity;
+                     };
+                    valA = getPrimaryDiskPercent(a.data);
+                    valB = getPrimaryDiskPercent(b.data);
+                }
+                // Disable sorting for network adapters
+                else if (currentSortKey === 'network_adapters') {
+                    return 0;
+                }
+                 // Use standard values for other columns
+                 else {
+                    valA = a.data[currentSortKey];
+                    valB = b.data[currentSortKey];
+                 }
+
+                // Generic comparison: Treat N/A or non-numeric as lowest value
+                const normalizeValue = (val) => {
+                    if (typeof val === 'string') return val.toLowerCase();
+                    // Check for finite numbers only, exclude NaN/Infinity
+                    if (typeof val === 'number' && isFinite(val)) return val;
+                    return -Infinity; // Sort N/A/null/undefined/NaN/Infinity lowest
+                };
+
+                const normA = normalizeValue(valA);
+                const normB = normalizeValue(valB);
+
+                let comparison = 0;
+                if (normA < normB) comparison = -1;
+                else if (normA > normB) comparison = 1;
+
+                return currentSortOrder === 'asc' ? comparison : comparison * -1;
+            });
+            // --- End Sorting Logic ---
+
+            // --- Populate Table (Modified) ---
+            dataArray.forEach(hostInfo => {
+                if (!hostInfo?.data) return;
+
+                const hostData = hostInfo.data;
+                // Ensure agent_ip is available, needed for peer traffic formatting
+                const agentIp = hostData.agent_ip || null;
+                const relativeTime = hostData.last_seen_relative || '<span class="na">N/A</span>';
+
+                const row = document.createElement('tr');
+                // *** UPDATE INNER HTML TO INCLUDE PEER TRAFFIC CELL ***
+                row.innerHTML = `
+                    <td class="fw-bold">${hostData.hostname || '<span class="na">N/A</span>'}</td>
+                    <td>${formatPercentWithProgress(hostData.cpu_percent)}</td>
+                    <td>${formatPercentWithProgress(hostData.mem_percent)}</td>
+                    <td>${formatNumRaw(hostData.total_throughput_mbps, 2)}</td>
+                    <td>${formatNumRaw(hostData.sent_mbps, 2)}</td>
+                    <td>${formatNumRaw(hostData.recv_mbps, 2)}</td>
+                    <td>${formatNetworkAdapters(hostData.network_adapters)}</td>
+                    <td>${formatPeerTraffic(hostData.peer_traffic, agentIp)}</td> <!-- New Cell -->
+                    <td>${formatDisks(hostData.disks)}</td>
+                    <td>${relativeTime}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        // --- Fetch Data Function (Unchanged) ---
+        async function fetchData() {
+             try {
+                const response = await fetch(apiUrl);
+                if (!response.ok) {
+                    let errorMsg = `HTTP error! Status: ${response.status} ${response.statusText}`;
+                    try { const errorData = await response.json(); if(errorData?.error) errorMsg += ` - ${errorData.error}`; }
+                    catch(jsonError) { /* Ignore */ }
+                    throw new Error(errorMsg);
+                }
+                const data = await response.json();
+                updateTable(data);
+                lastUpdatedDiv.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+             } catch (e) {
+                console.error("Error fetching data:", e);
+                errorDiv.textContent = `Error fetching data: ${e.message}. Collector running?`;
+                errorDiv.classList.remove('d-none');
+            }
+        }
+
+        // --- Handle Header Clicks for Sorting (Modified) ---
+        function handleSortClick(event) {
+             const header = event.target.closest('th');
+             if (!header || !header.dataset.sortkey) return;
+
+             const sortKey = header.dataset.sortkey;
+
+             // Prevent sorting on network adapters column
+             if (sortKey === 'network_adapters') {
+                  console.log("Sorting disabled for Network Interfaces column.");
+                  return;
+             }
+
+             if (sortKey === currentSortKey) {
+                currentSortOrder = currentSortOrder === 'asc' ? 'desc' : 'asc';
+             } else {
+                currentSortKey = sortKey;
+                // Default sort order: asc for text (hostname), desc for numbers (including peer traffic total)
+                currentSortOrder = (sortKey === 'hostname') ? 'asc' : 'desc';
+             }
+
+             updateSortIndicators();
+             fetchData(); // Re-fetch to apply sort
+        }
+
+        // --- Update Visual Indicators on Headers (Modified) ---
+        function updateSortIndicators() {
+            tableHeaders.forEach(th => {
+                 th.classList.remove('sort-asc', 'sort-desc');
+                 const sortKey = th.dataset.sortkey;
+                 // Only add indicator if sorting is enabled AND it's the current sort key
+                 if (sortKey !== 'network_adapters' && sortKey === currentSortKey) { // Exclude non-sortable columns
+                     th.classList.add(currentSortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
+                 }
+            });
+        }
+
+        // --- Initial Setup (Unchanged) ---
+        tableHeaders.forEach(header => {
+            header.addEventListener('click', handleSortClick);
+        });
+        updateSortIndicators();
+        fetchData();
+        setInterval(fetchData, refreshInterval);
+
+    </script>
+
+</body>
+</html>
