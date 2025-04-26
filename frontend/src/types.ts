@@ -60,7 +60,10 @@ export interface SystemData {
   has_alert?: boolean;
   // --- END ADDITION ---
 }
-
+export interface SelectOption {
+  value: string;
+  label: string;
+}
 export interface HostData {
   data: SystemData;
   last_seen: number;

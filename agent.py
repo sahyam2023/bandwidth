@@ -9,7 +9,10 @@ import ipaddress
 from collections import defaultdict, deque # Added deque
 import datetime
 import threading
-import signal 
+import signal
+import platform  # <-- NEW: For OS-specific ping command
+import subprocess # <-- NEW: To run ping
+import re 
 
 # --- Packet Capture Dependencies ---
 try:
@@ -37,6 +40,11 @@ PEER_IP_REFRESH_INTERVAL_SECONDS = 300 # How often to ask collector for peer lis
 SNIFF_INTERFACE = None # Set to specific interface name (e.g., "Ethernet", "eth0") to override auto-detect
 DISKS_TO_MONITOR_USAGE = None # List of mount points (e.g. ["/", "/mnt/data"], or None for all physical)
 INTERFACES_TO_MONITOR = None # List of NIC names (e.g. ["Ethernet", "eth0"] or None for all non-virtual)
+PING_INTERVAL_SECONDS = 60 # How often to ping peers/collector
+PING_TIMEOUT_SECONDS = 1   # Timeout for each individual ping command
+PING_COUNT = 2
+latest_ping_results = {} # { target_ip: {"status": "success/timeout/error", "latency_ms": float or None, "timestamp": float} }
+ping_results_lock = threading.Lock()
 
 
 # --- Global Variables ---
@@ -238,7 +246,6 @@ def packet_handler(packet):
         src_ip = packet[IP].src
         dst_ip = packet[IP].dst
         is_internal_traffic = False
-        # Check *under lock* if BOTH source and destination are known peers
         with peer_ip_lock:
             # Make sure current_peer_ips has been populated before checking
             if current_peer_ips and src_ip in current_peer_ips and dst_ip in current_peer_ips:
@@ -274,6 +281,134 @@ def start_sniffer(interface, stop_evt):
     except Exception as e:
         print(f"\nERROR: Unexpected error starting sniffer: {e}")
         stop_evt.set()
+
+def execute_ping(target_ip):
+    """Pings a target IP and returns status and average latency."""
+    system = platform.system().lower()
+    timeout_ms = PING_TIMEOUT_SECONDS * 1000
+
+    if system == "windows":
+        # -n count, -w timeout (milliseconds)
+        command = ['ping', '-n', str(PING_COUNT), '-w', str(timeout_ms), target_ip]
+        # Example output parsing (adjust if your Windows ping output differs)
+        # Reply from 192.168.1.1: bytes=32 time=10ms TTL=64
+        # Minimum = 9ms, Maximum = 11ms, Average = 10ms
+        success_regex = re.compile(r"Reply from.*time[=<](?P<ms>\d+?)ms")
+        avg_regex = re.compile(r"Average = (?P<ms>\d+)ms")
+    else: # Linux/macOS
+        # -c count, -W timeout (seconds), -i interval (can keep default)
+        # Use deadline (-w) as primary timeout mechanism if available, else rely on -W in subprocess
+        # Using -W timeout with subprocess.run is generally more reliable
+        command = ['ping', '-c', str(PING_COUNT), '-W', str(PING_TIMEOUT_SECONDS), target_ip]
+        # Example output parsing (Linux - adjust for macOS if needed)
+        # 64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=1.23 ms
+        # rtt min/avg/max/mdev = 1.10/1.20/1.30/0.10 ms
+        success_regex = re.compile(r"bytes from.*time=(?P<ms>\d+\.?\d*) *ms") # Handle float ms
+        avg_regex = re.compile(r"min/avg/max/mdev = [\d.]+/([\d.]+)/") # Extract avg
+
+    latency_sum = 0.0
+    replies_received = 0
+    avg_latency = None
+    status = "error" # Default status
+
+    try:
+        # Use subprocess.run for better control over timeout and output capture
+        result = subprocess.run(command, capture_output=True, text=True, timeout=PING_TIMEOUT_SECONDS + 1) # Add buffer to timeout
+
+        if result.returncode == 0: # Success exit code from ping command
+            output = result.stdout
+            # Find individual successful pings
+            matches = success_regex.findall(output)
+            replies_received = len(matches)
+            if replies_received > 0:
+                 status = "success"
+                 # Try to extract average directly if possible
+                 avg_match = avg_regex.search(output)
+                 if avg_match:
+                      avg_latency = float(avg_match.group(1))
+                 else:
+                     # Fallback: Average the individual times found
+                     for ms_str in matches:
+                          try:
+                              latency_sum += float(ms_str)
+                          except ValueError: pass # Ignore if parsing fails
+                     if replies_received > 0:
+                          avg_latency = round(latency_sum / replies_received, 2)
+
+            else: # Ping command succeeded but no replies (e.g., filtered) - treat as timeout?
+                 status = "timeout"
+
+        # Handle specific non-zero return codes if needed (e.g., host unreachable)
+        elif result.returncode == 1 and system != "windows": # Often means timeout/unreachable on Linux/Mac
+             status = "timeout"
+        elif result.returncode != 0 :
+             status = "error" # Other errors
+             print(f"Ping command failed for {target_ip}. Return Code: {result.returncode}")
+             print(f"Stderr: {result.stderr}")
+
+
+    except subprocess.TimeoutExpired:
+        print(f"Ping process timed out for {target_ip}")
+        status = "timeout"
+    except FileNotFoundError:
+        print(f"ERROR: 'ping' command not found. Cannot perform ping tests.")
+        status = "error" # Or a specific status?
+    except Exception as e:
+        print(f"Unexpected error pinging {target_ip}: {e}")
+        status = "error"
+
+    # Round latency
+    if avg_latency is not None:
+        avg_latency = round(avg_latency, 2)
+
+    return {"status": status, "latency_ms": avg_latency}
+
+
+# --- NEW: Ping Thread Function ---
+def ping_targets_periodically(agent_ip, collector_ip, interval, stop_evt):
+    """Periodically pings other known peers and the collector."""
+    global latest_ping_results, ping_results_lock, current_peer_ips, peer_ip_lock
+    print(f"Ping thread started (interval: {interval}s)")
+
+    while not stop_evt.wait(interval):
+        if stop_evt.is_set(): break
+
+        targets_to_ping = set()
+        # Get current peers under lock
+        with peer_ip_lock:
+            targets_to_ping.update(current_peer_ips)
+        # Add collector IP
+        if collector_ip:
+             targets_to_ping.add(collector_ip)
+        # Remove self from targets
+        targets_to_ping.discard(agent_ip)
+
+        if not targets_to_ping:
+            # print("Ping: No targets to ping.") # Can be noisy
+            continue
+
+        results_this_round = {}
+        print(f"Ping: Pinging {len(targets_to_ping)} targets: {targets_to_ping}")
+        for target in targets_to_ping:
+            ping_result = execute_ping(target)
+            results_this_round[target] = {
+                "status": ping_result["status"],
+                "latency_ms": ping_result["latency_ms"],
+                "timestamp": time.time()
+            }
+            # Optional small sleep between pings to avoid overwhelming network/CPU
+            time.sleep(0.05)
+            if stop_evt.is_set(): break # Check stop event between pings
+
+        # Update global results under lock
+        with ping_results_lock:
+            latest_ping_results = results_this_round
+            # print(f"Ping results updated: {latest_ping_results}") # Can be noisy
+
+        if stop_evt.is_set(): break
+
+    print("Ping thread stopped.")
+
 
 
 # --- Signal Handler ---
@@ -333,10 +468,13 @@ if __name__ == "__main__":
 
     # --- Start Background Threads ---
     print("\n--- Starting Background Threads ---")
-    sniffer_thread = None
+    sniffer_thread = None # Initialize to None
+    ip_refresh_thread = None # Initialize to None
+    ping_thread = None # <<<< Initialize ping_thread to None >>>>
     if NPCAP_AVAILABLE and sniff_iface_name:
         sniffer_thread = threading.Thread(target=start_sniffer, args=(sniff_iface_name, stop_event), daemon=True)
         sniffer_thread.start()
+        print("Sniffer thread started.")
         time.sleep(2) # Give sniffer a moment to start or fail
         # Check if sniffer thread failed immediately
         if stop_event.is_set():
@@ -347,7 +485,143 @@ if __name__ == "__main__":
 
     ip_refresh_thread = threading.Thread(target=refresh_peer_ips_periodically, args=(collector_peer_url, PEER_IP_REFRESH_INTERVAL_SECONDS, stop_event), daemon=True)
     ip_refresh_thread.start()
+    print("IP Refresh thread started.")
+
+    # --- >>> ADDED PING THREAD START <<< ---
+    ping_thread = threading.Thread(target=ping_targets_periodically, args=(agent_ip, collector_ip, PING_INTERVAL_SECONDS, stop_event), daemon=True)
+    ping_thread.start()
+    print("Ping thread started.")
+    # --- >>> END ADDED PING THREAD START <<< ---
+
     print("-------------------------------\n")
+    
+    def execute_ping(target_ip):
+        """Pings a target IP and returns status and average latency."""
+        system = platform.system().lower()
+        timeout_ms = PING_TIMEOUT_SECONDS * 1000
+
+        if system == "windows":
+            # -n count, -w timeout (milliseconds)
+            command = ['ping', '-n', str(PING_COUNT), '-w', str(timeout_ms), target_ip]
+            # Example output parsing (adjust if your Windows ping output differs)
+            # Reply from 192.168.1.1: bytes=32 time=10ms TTL=64
+            # Minimum = 9ms, Maximum = 11ms, Average = 10ms
+            success_regex = re.compile(r"Reply from.*time[=<](?P<ms>\d+?)ms")
+            avg_regex = re.compile(r"Average = (?P<ms>\d+)ms")
+        else: # Linux/macOS
+            # -c count, -W timeout (seconds), -i interval (can keep default)
+            # Use deadline (-w) as primary timeout mechanism if available, else rely on -W in subprocess
+            # Using -W timeout with subprocess.run is generally more reliable
+            command = ['ping', '-c', str(PING_COUNT), '-W', str(PING_TIMEOUT_SECONDS), target_ip]
+            # Example output parsing (Linux - adjust for macOS if needed)
+            # 64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=1.23 ms
+            # rtt min/avg/max/mdev = 1.10/1.20/1.30/0.10 ms
+            success_regex = re.compile(r"bytes from.*time=(?P<ms>\d+\.?\d*) *ms") # Handle float ms
+            avg_regex = re.compile(r"min/avg/max/mdev = [\d.]+/([\d.]+)/") # Extract avg
+
+        latency_sum = 0.0
+        replies_received = 0
+        avg_latency = None
+        status = "error" # Default status
+
+        try:
+            # Use subprocess.run for better control over timeout and output capture
+            result = subprocess.run(command, capture_output=True, text=True, timeout=PING_TIMEOUT_SECONDS + 1) # Add buffer to timeout
+
+            if result.returncode == 0: # Success exit code from ping command
+                output = result.stdout
+                # Find individual successful pings
+                matches = success_regex.findall(output)
+                replies_received = len(matches)
+                if replies_received > 0:
+                    status = "success"
+                    # Try to extract average directly if possible
+                    avg_match = avg_regex.search(output)
+                    if avg_match:
+                        avg_latency = float(avg_match.group(1))
+                    else:
+                        # Fallback: Average the individual times found
+                        for ms_str in matches:
+                            try:
+                                latency_sum += float(ms_str)
+                            except ValueError: pass # Ignore if parsing fails
+                        if replies_received > 0:
+                            avg_latency = round(latency_sum / replies_received, 2)
+
+                else: # Ping command succeeded but no replies (e.g., filtered) - treat as timeout?
+                    status = "timeout"
+
+            # Handle specific non-zero return codes if needed (e.g., host unreachable)
+            elif result.returncode == 1 and system != "windows": # Often means timeout/unreachable on Linux/Mac
+                status = "timeout"
+            elif result.returncode != 0 :
+                status = "error" # Other errors
+                print(f"Ping command failed for {target_ip}. Return Code: {result.returncode}")
+                print(f"Stderr: {result.stderr}")
+
+
+        except subprocess.TimeoutExpired:
+            print(f"Ping process timed out for {target_ip}")
+            status = "timeout"
+        except FileNotFoundError:
+            print(f"ERROR: 'ping' command not found. Cannot perform ping tests.")
+            status = "error" # Or a specific status?
+        except Exception as e:
+            print(f"Unexpected error pinging {target_ip}: {e}")
+            status = "error"
+
+        # Round latency
+        if avg_latency is not None:
+            avg_latency = round(avg_latency, 2)
+
+        return {"status": status, "latency_ms": avg_latency}
+
+
+    # --- NEW: Ping Thread Function ---
+    def ping_targets_periodically(agent_ip, collector_ip, interval, stop_evt):
+        """Periodically pings other known peers and the collector."""
+        global latest_ping_results, ping_results_lock, current_peer_ips, peer_ip_lock
+        print(f"Ping thread started (interval: {interval}s)")
+
+        while not stop_evt.wait(interval):
+            if stop_evt.is_set(): break
+
+            targets_to_ping = set()
+            # Get current peers under lock
+            with peer_ip_lock:
+                targets_to_ping.update(current_peer_ips)
+            # Add collector IP
+            if collector_ip:
+                targets_to_ping.add(collector_ip)
+            # Remove self from targets
+            targets_to_ping.discard(agent_ip)
+
+            if not targets_to_ping:
+                # print("Ping: No targets to ping.") # Can be noisy
+                continue
+
+            results_this_round = {}
+            print(f"Ping: Pinging {len(targets_to_ping)} targets: {targets_to_ping}")
+            for target in targets_to_ping:
+                ping_result = execute_ping(target)
+                results_this_round[target] = {
+                    "status": ping_result["status"],
+                    "latency_ms": ping_result["latency_ms"],
+                    "timestamp": time.time()
+                }
+                # Optional small sleep between pings to avoid overwhelming network/CPU
+                time.sleep(0.05)
+                if stop_evt.is_set(): break # Check stop event between pings
+
+            # Update global results under lock
+            with ping_results_lock:
+                latest_ping_results = results_this_round
+                # print(f"Ping results updated: {latest_ping_results}") # Can be noisy
+
+            if stop_evt.is_set(): break
+
+        print("Ping thread stopped.")
+
 
     # --- Register Signal Handler ---
     signal.signal(signal.SIGINT, signal_handler) # Handle Ctrl+C
@@ -531,6 +805,11 @@ if __name__ == "__main__":
             except Exception as e:
                  print(f"\nWarning: Error calculating disk I/O stats: {e}")
                  # Keep disk_io_rates empty if calculation fails
+            
+            ping_data = {}
+            with ping_results_lock:
+                 # Make a copy to avoid holding lock during payload assembly
+                 ping_data = latest_ping_results.copy()
 
             # --- Assemble Payload ---
             payload = {
@@ -543,7 +822,8 @@ if __name__ == "__main__":
                 "disk_usage": disk_usage, # Disk space utilization
                 "network": network_data,   # Network throughput/utilization
                 "disk_io": disk_io_rates,  # Disk IOPS and Bps (NEW)
-                "peer_traffic": peer_traffic_this_interval # Peer traffic from sniffer
+                "peer_traffic": peer_traffic_this_interval, # Peer traffic from sniffer
+                "ping_results": ping_data
             }
 
             # --- Send Data ---
@@ -584,4 +864,8 @@ if __name__ == "__main__":
         if ip_refresh_thread and ip_refresh_thread.is_alive():
             print("Waiting for IP refresh thread...")
             ip_refresh_thread.join(timeout=1.0)
+        # --- Now ping_thread should be defined if started ---
+        if ping_thread and ping_thread.is_alive(): # Check if it was created and is running
+            print("Waiting for ping thread...")
+            ping_thread.join(timeout=1.0)
         print("Agent finished.")
