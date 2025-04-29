@@ -20,8 +20,6 @@ NETWORK_CHOKE_THRESHOLD_PERCENT = 80.0
 DATABASE = 'collector_data.db' # <-- NEW: Database file path
 try:
      COLLECTOR_HOSTNAME = socket.gethostname()
-     # Optionally resolve hostname to an IP if needed, but hostname is better ID
-     # COLLECTOR_IP_FOR_GRAPH = socket.gethostbyname(COLLECTOR_HOSTNAME) # Might fail/be ambiguous
      COLLECTOR_ID_FOR_GRAPH = COLLECTOR_HOSTNAME # Use hostname as the primary ID/Name
 except socket.gaierror:
      COLLECTOR_ID_FOR_GRAPH = LISTEN_IP # Fallback (0.0.0.0 isn't ideal, maybe use a specific interface IP?)
@@ -49,8 +47,6 @@ ALERT_PING_LATENCY_THRESHOLD_MS = 500
 
 
 # --- Global Variables ---
-# Removed agent_data_store and data_lock for history
-# NEW: In-memory snapshot for *latest* data only + Active Alerts
 latest_agent_snapshot = {} # { hostname: { last_seen: ts, latest_metrics: {...} } }
 active_alerts = {}         # { alert_id: { hostname, type, message, value, threshold, start_time } }
 # Use separate locks for snapshot and alerts
@@ -153,9 +149,6 @@ def init_db():
 
 # --- Helper Functions (Keep extract_key_metrics and format_time_ago as they are useful) ---
 def extract_key_metrics(payload):
-    # ... (Keep existing implementation - it processes one payload for the snapshot) ...
-    # ... (Ensure it handles potential missing keys gracefully) ...
-    # ADDED: Extract Disk IOPS for potential alerting/display
     disk_io_payload = payload.get('disk_io', {})
     processed_disk_io = {}
     if isinstance(disk_io_payload, dict):
@@ -237,13 +230,11 @@ def extract_key_metrics(payload):
 def generate_alert_key(hostname, alert_type, specific_target=None):
     key = f"{hostname}_{alert_type}"
     if specific_target:
-        # Normalize target name slightly (replace spaces, common chars) for consistency
         safe_target = str(specific_target).replace(' ', '_').replace(':', '').replace('\\','').replace('/','')
         key += f"_{safe_target}"
     return key
 
 def format_time_ago(seconds_past):
-    # ... (Keep existing implementation) ...
     if not isinstance(seconds_past, (int, float)) or seconds_past < 0: return 'N/A'
     seconds_past = int(seconds_past) # Convert to int for display
     if seconds_past < 60: return f"{seconds_past}s ago"
@@ -312,15 +303,6 @@ def cleanup_old_metrics():
             conn.close()
 
     print(f"[{datetime.datetime.now()}] Database cleanup finished. Attempted to delete {total_deleted_rows} metric rows.")
-    # Optional VACUUM remains the same
-    # ...
-
-        # Optional: VACUUM to reclaim disk space (can be slow and locks DB)
-        # if total_deleted_rows > 0:
-        #     print(f"[{datetime.datetime.now()}] Starting VACUUM...")
-        #     conn.execute("VACUUM;")
-        #     conn.commit()
-        #     print(f"[{datetime.datetime.now()}] VACUUM finished.")
 
 def run_cleanup_scheduler():
     """Runs the cleanup task periodically."""
@@ -730,8 +712,6 @@ def get_latest_data():
     return jsonify(active_data)
 
 
-# --- REMOVED /api/host_history/<hostname> endpoint ---
-# This will be re-added in Phase 3 with proper DB querying for ranges
 
 # --- MODIFIED /api/get_peer_ips endpoint ---
 @app.route('/api/get_peer_ips')
@@ -783,9 +763,6 @@ def get_all_peer_flows():
          "is_collector": True # Mark as collector
     }
     # --- END Add Collector Node ---
-
-    active_agents = {} # Store latest metric info {hostname: {ip: ..., peer_traffic: ...}}
-
     try:
         cursor = db.cursor()
         # Get active hostnames and their IPs first
@@ -946,8 +923,6 @@ def get_summary_stats():
     if not db: return jsonify({"error": "Database connection failed"}), 500
 
     active_hostnames = set()
-    latest_metrics_data = {} # Store latest network/peer traffic for aggregation
-
     try:
         cursor = db.cursor()
 
@@ -1155,15 +1130,6 @@ def get_host_history(hostname):
                 #    print(f"Warning: Interface '{iface_name}' not pre-initialized.")
 
 
-            # --- DEBUG: Check if lengths match after processing each row ---
-            # current_ts_len = len(history_data["timestamps"])
-            # for if_name, if_data in history_data["network_interfaces"].items():
-            #     if len(if_data["sent_Mbps"]) != current_ts_len:
-            #         print(f"!!! Length mismatch for {if_name} Sent after row {row_index}: {len(if_data['sent_Mbps'])} != {current_ts_len}")
-            #     if len(if_data["recv_Mbps"]) != current_ts_len:
-            #         print(f"!!! Length mismatch for {if_name} Recv after row {row_index}: {len(if_data['recv_Mbps'])} != {current_ts_len}")
-
-
         # Final length check (should be redundant now but safe)
         expected_length = len(history_data["timestamps"])
         for iface_name in list(history_data["network_interfaces"].keys()): # Iterate over copy of keys
@@ -1174,10 +1140,6 @@ def get_host_history(hostname):
              # Trim if somehow too long (also unlikely)
              net_iface["sent_Mbps"] = net_iface["sent_Mbps"][:expected_length]
              net_iface["recv_Mbps"] = net_iface["recv_Mbps"][:expected_length]
-             # --- DEBUG: Check if all values are null ---
-             # if all(v is None for v in net_iface["sent_Mbps"]) and all(v is None for v in net_iface["recv_Mbps"]):
-             #      print(f"Warning: Interface '{iface_name}' history contains only null values.")
-
 
     except sqlite3.Error as e:
         print(f"DB Error fetching history for {hostname}: {e}")
@@ -1198,8 +1160,6 @@ def get_connectivity_status():
         "nodes": [], # List of node info { id, name, is_collector }
         "links": []  # List of ping links { source, target, status, latency_ms }
     }
-    active_nodes_snapshot = {}
-
     # --- 1. Get current snapshot and identify active nodes ---
     with snapshot_lock:
         snapshot_copy = copy.deepcopy(latest_agent_snapshot)
@@ -1267,10 +1227,6 @@ def get_connectivity_status():
                  continue
 
             target_node_id = None # Reset for each target IP
-
-            # --- Revised Target Matching ---
-            # 1. Check if target IP is the Collector's ID or Listen IP
-            #    (Assuming COLLECTOR_ID_FOR_GRAPH is the pingable ID/IP for the collector)
             if target_ip == COLLECTOR_ID_FOR_GRAPH:
                  target_node_id = COLLECTOR_ID_FOR_GRAPH # Use the collector's consistent ID
                  print(f"DEBUG Connectivity: Matched {target_ip} to Collector Node ID {target_node_id}")
@@ -1537,11 +1493,9 @@ if __name__ == '__main__':
     down_checker = threading.Thread(target=check_agent_down_status, daemon=True)
     down_checker.start()
     
-     # Start the background thread for data cleanup <-- ADDED
+     # Start the background thread for data cleanup
     cleanup_scheduler = threading.Thread(target=run_cleanup_scheduler, daemon=True)
     cleanup_scheduler.start() # <-- ADDED
 
     print(f"Simple UI collector server starting at http://{LISTEN_IP}:{LISTEN_PORT}")
-    # Use Flask's built-in server for dev/testing
-    # Consider Waitress or Gunicorn for production
     app.run(host=LISTEN_IP, port=LISTEN_PORT, debug=False, threaded=True) # Use threaded for handling multiple requests + background task

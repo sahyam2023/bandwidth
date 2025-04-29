@@ -6,12 +6,12 @@ import socket
 import sys
 import json
 import ipaddress
-from collections import defaultdict, deque # Added deque
+from collections import defaultdict
 import datetime
 import threading
 import signal
-import platform  # <-- NEW: For OS-specific ping command
-import subprocess # <-- NEW: To run ping
+import platform 
+import subprocess
 import re 
 
 # --- Packet Capture Dependencies ---

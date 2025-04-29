@@ -1,10 +1,9 @@
 // src/components/HostCard.tsx
 import { FC } from 'react';
-// *** FIX: Add HardDrive to the import ***
 import { ArrowUpDown, ArrowUp, ArrowDown, Server, HardDrive } from 'lucide-react';
 import ProgressBar from './ProgressBar';
-import { HostCardProps, SortKey, PeerFlow, DiskIoStats } from '../types'; // Make sure DiskIoStats is imported if used in calculation
-import React from 'react'; // Keep React import for React.createElement
+import { HostCardProps, SortKey, PeerFlow, DiskIoStats } from '../types'; 
+import React from 'react'; 
 import { Sparklines, SparklinesLine } from 'react-sparklines';
 
 
@@ -107,7 +106,6 @@ const HostCard: FC<HostCardProps> = ({ hostname, data, onSelect, sortConfig, onS
                 {React.createElement(getSortIcon('cpu_percent'), { className: "w-4 h-4" })}
               </button>
             </div>
-            {/* --- MODIFIED BLOCK: Show Sparkline OR ProgressBar (Lines 60-69) --- */}
             <div className="h-6"> {/* Set fixed height container */}
                {hasCpuHistory ? (
                 <Sparklines data={cpuHistory} svgWidth={100} svgHeight={24} margin={2}>
@@ -118,7 +116,6 @@ const HostCard: FC<HostCardProps> = ({ hostname, data, onSelect, sortConfig, onS
                  <ProgressBar value={data.cpu_percent} small />
                )}
             </div>
-            {/* --- END MODIFIED BLOCK --- */}
           </div>
 
           {/* Memory Section */}

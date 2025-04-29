@@ -1,4 +1,4 @@
-// src/components/ProgressBar.tsx (Corrected Code)
+// src/components/ProgressBar.tsx
 import { FC } from 'react';
 
 interface ProgressBarProps {
@@ -28,14 +28,6 @@ const ProgressBar: FC<ProgressBarProps> = ({ value, large, small }) => {
         className={`${getColorClass(value)} rounded-full ${height} transition-all duration-300`}
         style={{ width: `${Math.min(Math.max(0, value), 100)}%` }} // Ensure width is between 0 and 100
       >
-        {/* --- REMOVED THE ABSOLUTELY POSITIONED SPAN --- */}
-        {/* {large && (
-          <span className="text-white text-xs font-medium absolute inset-0 flex items-center justify-center">
-            {value.toFixed(1)}%
-          </span>
-        )} */}
-        {/* Add a non-breaking space to ensure the div has height even when width is 0% */}
-
       </div>
     </div>
   );

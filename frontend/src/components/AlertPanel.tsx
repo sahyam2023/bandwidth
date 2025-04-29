@@ -1,4 +1,4 @@
-// src/components/AlertPanel.tsx (New File)
+// src/components/AlertPanel.tsx
 import { X, AlertTriangle } from 'lucide-react';
 import { AlertInfo } from '../types';
 

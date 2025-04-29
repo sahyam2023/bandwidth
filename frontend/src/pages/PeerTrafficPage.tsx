@@ -53,7 +53,7 @@ const MIN_LINK_WIDTH = 1.0;
 const ARROW_LENGTH = 6;
 const ARROW_COLOR = 'rgba(150, 150, 150, 0.9)'; // Gray
 const LINK_COLOR_REPORTING = 'rgba(150, 150, 150, 0.4)'; // Light Gray
-const LINK_COLOR_PEER = 'rgba(128, 128, 255, 0.7)'; // Purpleish
+// const LINK_COLOR_PEER = 'rgba(128, 128, 255, 0.7)'; // Purpleish
 // Particle Style
 const PARTICLE_MIN_RATE_MBPS = 5;
 const PARTICLE_COUNT = 2;

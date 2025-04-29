@@ -1,6 +1,5 @@
 // src/pages/AlertsPage.tsx
 import { useState, useEffect, useCallback, useMemo } from 'react';
-// --- Updated Icon Imports ---
 import {
     AlertTriangle, ArrowUpDown, ArrowUp, ArrowDown, Loader2,
     ShieldCheck, Info, Server, Type, X // Added X for potentially clearing filters later
@@ -12,15 +11,15 @@ import { format, formatDistanceToNow } from 'date-fns';
 // Adjust based on the actual fields returned by /api/alerts
 interface ApiAlert {
     hostname: string;
-    alert_type: string; // <-- Changed from 'type'
-    specific_target: string | null; // Added this earlier
+    alert_type: string; // 
+    specific_target: string | null; 
     status: 'active' | 'resolved';
     message: string;
-    current_value: number | string | null; // Corrected from 'value'
-    threshold_value: number | string | null; // Corrected from 'threshold'
-    first_triggered_unix: number; // Corrected from 'start_time'
-    last_active_unix: number; // Corrected from 'last_active_time'
-    resolved_unix: number | null; // <-- Changed from 'resolved_time'
+    current_value: number | string | null; 
+    threshold_value: number | string | null; 
+    first_triggered_unix: number; 
+    last_active_unix: number; 
+    resolved_unix: number | null; // 
     // id?: number; // Optional ID from DB
 }
 
@@ -219,12 +218,6 @@ function AlertsPage() {
                         onChange={(e) => setAlertTypeFilter(e.target.value)}
                         className="block w-full pl-10 pr-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
                      />
-                      {/* Optional: Add a clear button
-                     {alertTypeFilter && (
-                        <button onClick={() => setAlertTypeFilter('')} className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600">
-                            <X size={14} />
-                        </button>
-                    )} */}
                 </div>
             </div>
             {/* --- END Filter Input Row --- */}
@@ -313,10 +306,6 @@ function AlertsPage() {
                                              Resolved {getSortIcon('resolved_unix')}
                                          </th>
                                      )}
-                                     {/* First Triggered Column (Could add this back if needed) */}
-                                    {/* <th scope="col" className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600" onClick={() => handleSort('first_triggered_unix')}>
-                                        Started {getSortIcon('first_triggered_unix')}
-                                    </th> */}
                                 </tr>
                             </thead>
                             {/* Table Body (Map over filteredAndSortedAlerts) */}
@@ -363,10 +352,6 @@ function AlertsPage() {
                                                 {alert.status === 'resolved' ? formatTimeAgo(alert.resolved_unix) : '-'}
                                             </td>
                                         )}
-                                        {/* First Triggered Cell (Could add back if needed) */}
-                                        {/* <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400" title={formatTimestamp(alert.first_triggered_unix)}>
-                                            {formatTimeAgo(alert.first_triggered_unix)}
-                                        </td> */}
                                     </tr>
                                 ))}
                             </tbody>
